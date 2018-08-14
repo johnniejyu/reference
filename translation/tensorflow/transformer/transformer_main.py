@@ -32,6 +32,7 @@ import tensorflow as tf
 import compute_bleu
 from data_download import VOCAB_FILE
 from model import transformer
+from model import skip_transformer
 from model import model_params
 import translate
 from utils import dataset
@@ -50,6 +51,7 @@ def model_fn(features, labels, mode, params):
 
     # Create model and get output logits.
     model = transformer.Transformer(params, mode == tf.estimator.ModeKeys.TRAIN)
+    #model = skip_transformer.SkipTransformer(params, mode == tf.estimator.ModeKeys.TRAIN)
 
     output = model(inputs, targets)
 

@@ -31,6 +31,9 @@ from model import ffn_layer
 from model import model_utils
 from utils.tokenizer import EOS_ID
 
+from tensorflow.python.framework import ops
+import sys
+
 _NEG_INF = -1e9
 
 # Define defaults for parameters
@@ -112,14 +115,19 @@ class SkipTransformer(object):
     with tf.name_scope("encode"):
       # Prepare inputs to the layer stack by adding positional encodings and
       # applying dropout.
+      #print(inputs.get_shape())
       embedded_inputs = self.embedding_softmax_layer(inputs)
       inputs_padding = model_utils.get_padding(inputs)
+      #print(embedded_inputs.get_shape())
+      #print(inputs_padding.get_shape())
 
       with tf.name_scope("add_pos_encoding"):
         length = tf.shape(embedded_inputs)[1]
         pos_encoding = model_utils.get_position_encoding(
             length, self.params.hidden_size)
+        #print(pos_encoding.get_shape())
         encoder_inputs = embedded_inputs + pos_encoding
+        #print(encoder_inputs.get_shape())
 
       if self.train:
         encoder_inputs = tf.nn.dropout(
@@ -288,6 +296,90 @@ class PrePostProcessingWrapper(object):
       y = tf.nn.dropout(y, 1 - self.postprocess_dropout)
     return x + y
 
+class LSTMGate(tf.layers.Layer):
+  """A module that uses a single layer lstm to act as gate for control """
+
+  def __init__(self, hidden_dim):#, rnn_type):
+    super(LSTMGate, self).__init__()
+    self._rnn = tf.nn.rnn_cell.LSTMCell(hidden_dim)
+    #if rnn_type == 'lstm':
+    #  cell_fn = tf.nn.rnn_cell.LSTMCell(hidden_dim)
+    #else:
+    #  raise Exception("Model type not supported: {}".format(rnn_type))
+    self.hidden = None
+    self.hidden_dim = hidden_dim
+
+    self.proj = tf.layers.Conv2D(filters=1, kernel_size=1, data_format='channels_first')
+    #self.prob = tf.Sigmoid()
+
+  def init_hidden(self, batch_size):
+    #return tf.Variable(tf.zeros([self.hidden_dim]), name="hiddenState")
+    return (tf.Variable(tf.zeros([batch_size, self.hidden_dim]), name="cellState"),tf.Variable(tf.zeros([batch_size, self.hidden_dim]), name="hiddenState"))
+    #return (tf.Variable(tf.zeros([1, batch_size, self.hidden_dim]), name="cellState"),tf.Variable(tf.zeros([1, batch_size, self.hidden_dim]), name="hiddenState"))
+
+  def call(self, x):
+    """Invoke the forward pass of the gate module. 
+    Args: 
+      input: a tensor of shape (batch_size, sequence_length * hidden_dim)
+    Returns: 
+      A tensor of the shape (batch_size, ?)
+    """
+    #print(type(x))
+    #x = ops.convert_to_tensor(x, dtype=self.dtype)
+    batch_size = x.get_shape()[0]
+    #out, self.hidden = self._rnn(tf.squeeze(x), self.hidden)
+    print(type(x))
+    print(x.get_shape())
+    print(self.hidden[0].get_shape())
+    print(type(self.hidden))
+    print(type(self.hidden[0]))
+    shape = x.get_shape().as_list()
+    output_shape = shape[:-1] + [self.hidden_dim]
+    #x = x.set_shape(output_shape)
+    print(type(x))
+    print(x.get_shape())
+    out, self.hidden = self._rnn(tf.reshape(x, [batch_size, -1]), self.hidden)
+    #out, self.hidden = self._rnn(self.hidden[0], self.hidden)
+
+    #out = tf.squeeze(out)
+    print('out shape')
+    print(out.get_shape())
+    # reduce dim
+    #proj = self.proj(out)
+
+#    proj_inputs = (
+#        inputs_list[0]
+#        if len(inputs_list) == 1 else tf.concat(inputs_list, axis=-1))
+#    proj = self.proj(tf.concat(out, [out.get_shape()[0], out.get_shape()[1], 1, 1]))
+
+    proj = self.proj(tf.reshape(out, [out.get_shape()[0], out.get_shape()[1], 1, 1]))
+    #prob = self.prob(proj)
+    prob = tf.sigmoid(proj)
+
+    disc_prob = tf.stop_gradient(tf.to_float((prob > 0.5))) - tf.stop_gradient(prob) + prob
+    print(type(prob))
+    print(type(disc_prob))
+    print(prob.get_shape())
+    print(disc_prob.get_shape())
+    #sys.exit()
+    disc_prob = tf.convert_to_tensor(disc_prob)
+    disc_prob = tf.reshape(disc_prob, [-1, 1])
+    #disc_prob = tf.reshape(disc_prob, [batch_size, 1])
+    #disc_prob = tf.reshape(disc_prob, [batch_size, 1, 1, 1])
+
+    return disc_prob
+
+class FFGate():
+  """Feed forward gate using several dense layers
+  """
+  def __init__(self):
+    super(FFGate, self).__init__()
+    self.weights = tf.get_variable()
+    self.bias = tf.get_variable()
+
+  def call(self, ):
+    dense(inputs)
+
 
 class EncoderStack(tf.layers.Layer):
   """Transformer encoder stack.
@@ -297,10 +389,13 @@ class EncoderStack(tf.layers.Layer):
     1. Self-attention layer
     2. Feedforward network (which is 2 fully-connected layers)
   """
-
   def __init__(self, params, train):
     super(EncoderStack, self).__init__()
+    self.control = LSTMGate(hidden_dim=512)#, rnn_type='lstm')
+    # reinitialize hidden units
+    self.control.hidden = self.control.init_hidden(params.batch_size)
     self.layers = []
+
     for _ in range(params.num_hidden_layers):
       # Create sublayers for each layer.
       self_attention_layer = attention_layer.SelfAttention(
@@ -317,15 +412,34 @@ class EncoderStack(tf.layers.Layer):
 
   def call(self, encoder_inputs, attention_bias, inputs_padding):
     for n, layer in enumerate(self.layers):
-      # Run inputs through the sublayers.
-      self_attention_layer = layer[0]
-      feed_forward_network = layer[1]
+      # add a gate for the middle layer
+      # must pass the first layer
+      if n == 5: #last one, params.num_hidden_layers // 2:
+        encoder_inputs_pre = encoder_inputs
+        #print(encoder_inputs.get_shape())
+        #sys.exit()
+        mask = self.control(encoder_inputs)
+        # Run inputs through the sublayers.
+        self_attention_layer = layer[0]
+        feed_forward_network = layer[1]
 
-      with tf.variable_scope("layer_%d" % n):
-        with tf.variable_scope("self_attention"):
-          encoder_inputs = self_attention_layer(encoder_inputs, attention_bias)
-        with tf.variable_scope("ffn"):
-          encoder_inputs = feed_forward_network(encoder_inputs, inputs_padding)
+        with tf.variable_scope("layer_%d" % n):
+          with tf.variable_scope("self_attention"):
+            encoder_inputs = self_attention_layer(encoder_inputs, attention_bias)
+          with tf.variable_scope("ffn"):
+            encoder_inputs = feed_forward_network(encoder_inputs, inputs_padding)
+        #encoder_inputs = mask.expand_as(encoder_inputs)*encoder_inputs + (1-mask).expand_as(encoder_inputs_prev)*encoder_inputs_prev
+        
+      else:
+        # Run inputs through the sublayers.
+        self_attention_layer = layer[0]
+        feed_forward_network = layer[1]
+
+        with tf.variable_scope("layer_%d" % n):
+          with tf.variable_scope("self_attention"):
+            encoder_inputs = self_attention_layer(encoder_inputs, attention_bias)
+          with tf.variable_scope("ffn"):
+            encoder_inputs = feed_forward_network(encoder_inputs, inputs_padding)
 
     return self.output_normalization(encoder_inputs)
 
@@ -343,6 +457,9 @@ class DecoderStack(tf.layers.Layer):
 
   def __init__(self, params, train):
     super(DecoderStack, self).__init__()
+    self.control = LSTMGate(hidden_dim=512)#, rnn_type='lstm')
+    # reinitialize hidden units
+    self.control.hidden = self.control.init_hidden(params.batch_size)
     self.layers = []
     for _ in range(params.num_hidden_layers):
       self_attention_layer = attention_layer.SelfAttention(
@@ -362,21 +479,44 @@ class DecoderStack(tf.layers.Layer):
   def call(self, decoder_inputs, encoder_outputs, decoder_self_attention_bias,
            attention_bias, cache=None):
     for n, layer in enumerate(self.layers):
-      self_attention_layer = layer[0]
-      enc_dec_attention_layer = layer[1]
-      feed_forward_network = layer[2]
+      if n == 5: # last one, params.num_hidden_layers // 2:
+        decoder_inputs_pre = decoder_inputs
+        mask = self.control(decoder_inputs)
 
-      # Run inputs through the sublayers.
-      layer_name = "layer_%d" % n
-      layer_cache = cache[layer_name] if cache is not None else None
-      with tf.variable_scope(layer_name):
-        with tf.variable_scope("self_attention"):
-          decoder_inputs = self_attention_layer(
-              decoder_inputs, decoder_self_attention_bias, cache=layer_cache)
-        with tf.variable_scope("encdec_attention"):
-          decoder_inputs = enc_dec_attention_layer(
-              decoder_inputs, encoder_outputs, attention_bias)
-        with tf.variable_scope("ffn"):
-          decoder_inputs = feed_forward_network(decoder_inputs)
+        self_attention_layer = layer[0]
+        enc_dec_attention_layer = layer[1]
+        feed_forward_network = layer[2]
+
+        # Run inputs through the sublayers.
+        layer_name = "layer_%d" % n
+        layer_cache = cache[layer_name] if cache is not None else None
+        with tf.variable_scope(layer_name):
+          with tf.variable_scope("self_attention"):
+            decoder_inputs = self_attention_layer(
+                decoder_inputs, decoder_self_attention_bias, cache=layer_cache)
+          with tf.variable_scope("encdec_attention"):
+            decoder_inputs = enc_dec_attention_layer(
+                decoder_inputs, encoder_outputs, attention_bias)
+          with tf.variable_scope("ffn"):
+            decoder_inputs = feed_forward_network(decoder_inputs)
+
+        decoder_inputs = mask.expand_as(decoder_inputs)*decoder_inputs + (1-mask).expand_as(decoder_inputs_prev)*decoder_inputs_prev
+      else:
+        self_attention_layer = layer[0]
+        enc_dec_attention_layer = layer[1]
+        feed_forward_network = layer[2]
+
+        # Run inputs through the sublayers.
+        layer_name = "layer_%d" % n
+        layer_cache = cache[layer_name] if cache is not None else None
+        with tf.variable_scope(layer_name):
+          with tf.variable_scope("self_attention"):
+            decoder_inputs = self_attention_layer(
+                decoder_inputs, decoder_self_attention_bias, cache=layer_cache)
+          with tf.variable_scope("encdec_attention"):
+            decoder_inputs = enc_dec_attention_layer(
+                decoder_inputs, encoder_outputs, attention_bias)
+          with tf.variable_scope("ffn"):
+            decoder_inputs = feed_forward_network(decoder_inputs)
 
     return self.output_normalization(decoder_inputs)
