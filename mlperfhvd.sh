@@ -56,7 +56,7 @@ SEED=1
 
 python_script=/nfs/site/home/jiangyu1/reference/translation/tensorflow/transformer/transformer_main_hvd.py
 TEST_SRC=/ubtdata1/jiangyu/mlperf/transformer/data_test/newstest2014.en
-TEST_REF=/ubtdata1/jiangyu/mlperf/transformer/data_test/newstest2014.de 
+TEST_REF=/ubtdata1/jiangyu/mlperf/transformer/data_test/newstest2014.de
 DATA_DIR=/home/jiangyu/
 MODEL_DIR=/ubtdata1/jiangyu/mlperf/transformer/model_$PARAMS-$CPUGPU-$NODES
 HOROVOD_TIMELINE_FILE=$MODEL_DIR/timeline.json
@@ -126,4 +126,3 @@ HOROVOD_TIMELINE=$HOROVOD_TIMELINE_FILE mpirun --mca btl_tcp_if_include eno1 --b
 #  --intra_op_parallelism_threads=$INTRA --batch_size=$batch_size \
 #  --inter_op_parallelism_threads=$INTER --model=$MODEL --variable_update horovod \
 #  --horovod_device cpu --data_dir $DATA_DIR --model_dir $MODEL_DIR
-
